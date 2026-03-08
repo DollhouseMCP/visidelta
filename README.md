@@ -1,4 +1,4 @@
-# Rendered Site Diff
+# VisiDelta
 
 A visual old-vs-new diff tool for static websites.
 
@@ -24,7 +24,7 @@ Git diffs are great for source-level review, but website changes often need rend
 Run from any repository you want to review (Jekyll default):
 
 ```bash
-/path/to/rendered-site-diff/scripts/build-rendered-diff-viewer.sh origin/main /tmp/site-diff serve .
+/path/to/visidelta/scripts/visidelta.sh origin/main /tmp/site-diff serve .
 ```
 
 Open:
@@ -34,11 +34,11 @@ Open:
 ## Usage
 
 ```bash
-build-rendered-diff-viewer.sh [BASE_REF] [OUT_DIR] [MODE] [TARGET_REPO]
+visidelta.sh [BASE_REF] [OUT_DIR] [MODE] [TARGET_REPO]
 ```
 
 - `BASE_REF`: Git ref to compare against (default `origin/main`)
-- `OUT_DIR`: output directory for generated diff site (default `/tmp/rendered-site-diff`)
+- `OUT_DIR`: output directory for generated diff site (default `/tmp/visidelta`)
 - `MODE`: `build` or `serve` (default `build`)
 - `TARGET_REPO`: repo path to diff (default `.`)
 
@@ -49,7 +49,7 @@ For non-Jekyll sites, pass build commands with env vars:
 ```bash
 BUILD_OLD_CMD='npm ci && npm run build && cp -R dist/. "$DEST_DIR"' \
 BUILD_NEW_CMD='npm ci && npm run build && cp -R dist/. "$DEST_DIR"' \
-./scripts/build-rendered-diff-viewer.sh origin/main /tmp/site-diff serve /path/to/repo
+./scripts/visidelta.sh origin/main /tmp/site-diff serve /path/to/repo
 ```
 
 Available env vars inside build commands:

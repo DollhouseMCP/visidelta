@@ -3,7 +3,7 @@
 set -euo pipefail
 
 BASE_REF="${1:-origin/main}"
-OUT_DIR="${2:-/tmp/rendered-site-diff}"
+OUT_DIR="${2:-/tmp/visidelta}"
 MODE="${3:-build}"
 TARGET_REPO="${4:-.}"
 PORT="${PORT:-4310}"
@@ -157,7 +157,7 @@ cat >"$OUT_DIR/index.html" <<'HTML'
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Rendered Site Diff</title>
+    <title>VisiDelta</title>
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 1.25rem; color: #111827; }
       h1 { margin: 0 0 0.5rem; }
@@ -171,7 +171,7 @@ cat >"$OUT_DIR/index.html" <<'HTML'
     </style>
   </head>
   <body>
-    <h1>Rendered Site Diff</h1>
+    <h1>VisiDelta</h1>
     <p>Compare <code>old</code> (base) vs <code>new</code> (current branch) as rendered pages.</p>
     <table>
       <thead>
@@ -646,7 +646,7 @@ cat >"$OUT_DIR/viewer.html" <<'HTML'
 HTML
 
 echo
-echo "Rendered diff viewer generated at: $OUT_DIR"
+echo "VisiDelta output generated at: $OUT_DIR"
 echo "Base ref: $BASE_REF"
 echo "Target repo: $REPO_ROOT"
 echo "Changed markdown pages: ${#CHANGED_MD[@]}"
