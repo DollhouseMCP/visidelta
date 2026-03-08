@@ -24,6 +24,9 @@ trap cleanup EXIT
 mkdir -p "$MAIN_SRC" "$OUT_DIR"
 rm -rf "$OLD_DIR" "$NEW_DIR" "$DIFF_DIR"
 mkdir -p "$OLD_DIR" "$NEW_DIR" "$DIFF_DIR"
+# Docker images may run as a different UID than the host user.
+# Keep output dirs writable for containerized static-site builds.
+chmod -R a+rwx "$OLD_DIR" "$NEW_DIR"
 
 echo "Exporting base ref '$BASE_REF' from $REPO_ROOT ..."
 git -C "$REPO_ROOT" archive --format=tar "$BASE_REF" | tar -xf - -C "$MAIN_SRC"
