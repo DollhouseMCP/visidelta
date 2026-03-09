@@ -75,9 +75,21 @@ build_site() {
 
 build_site "$MAIN_SRC" "$OLD_DIR" "base" "/old" "${BUILD_OLD_CMD:-}"
 build_site "$REPO_ROOT" "$NEW_DIR" "current" "/new" "${BUILD_NEW_CMD:-${BUILD_OLD_CMD:-}}"
-# Build output ownership/permissions vary by container/runtime. Ensure rewrite
-# and post-processing can edit generated HTML files.
-chmod -R a+rwX "$OLD_DIR" "$NEW_DIR"
+
+normalize_build_output_permissions() {
+  local site_dir="$1"
+  local tmp_dir="${site_dir}.rw"
+  rm -rf "$tmp_dir"
+  mkdir -p "$tmp_dir"
+  cp -R "$site_dir"/. "$tmp_dir"/
+  rm -rf "$site_dir"
+  mv "$tmp_dir" "$site_dir"
+}
+
+# Build output ownership/permissions vary by container/runtime.
+# Re-copy output to a user-owned tree so post-processing is always writable.
+normalize_build_output_permissions "$OLD_DIR"
+normalize_build_output_permissions "$NEW_DIR"
 
 rewrite_prefixed_links_relative() {
   local site_dir="$1"
