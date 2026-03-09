@@ -47,7 +47,7 @@ build_with_default_jekyll() {
     -v "$src_dir":/srv/jekyll \
     -v "$dest_dir":/out \
     jekyll/jekyll:pages \
-    sh -lc "jekyll build --source /srv/jekyll --destination /out --baseurl '$baseurl' --verbose >/dev/null && chown -R \"${HOST_UID}:${HOST_GID}\" /out || true"
+    sh -lc "jekyll build --source /srv/jekyll --destination /out --baseurl '$baseurl' --verbose >/dev/null && chown -R \"\$HOST_UID:\$HOST_GID\" /out || true"
 }
 
 build_with_cmd() {
