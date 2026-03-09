@@ -76,6 +76,33 @@ build_site() {
 build_site "$MAIN_SRC" "$OLD_DIR" "base" "/old" "${BUILD_OLD_CMD:-}"
 build_site "$REPO_ROOT" "$NEW_DIR" "current" "/new" "${BUILD_NEW_CMD:-${BUILD_OLD_CMD:-}}"
 
+rewrite_prefixed_links_relative() {
+  local site_dir="$1"
+  local segment="$2"
+  local needle="/${segment}/"
+
+  while IFS= read -r -d '' html_file; do
+    local dir rel prefix count i
+    dir="$(dirname "$html_file")"
+    if [[ "$dir" == "$site_dir" ]]; then
+      prefix=""
+    else
+      rel="${dir#"$site_dir"/}"
+      count="$(awk -F'/' '{print NF}' <<<"$rel")"
+      prefix=""
+      for ((i = 0; i < count; i += 1)); do
+        prefix+="../"
+      done
+    fi
+    NEEDLE="$needle" REPL="$prefix" perl -0pi -e 's/\Q$ENV{NEEDLE}\E/$ENV{REPL}/g;' "$html_file"
+  done < <(find "$site_dir" -type f -name "*.html" -print0)
+}
+
+# Hosted previews often live under nested paths. Convert absolute /old/... and
+# /new/... links to page-relative links so CSS and assets resolve correctly.
+rewrite_prefixed_links_relative "$OLD_DIR" "old"
+rewrite_prefixed_links_relative "$NEW_DIR" "new"
+
 route_for_markdown() {
   local path="$1"
   if [[ "$path" == "index.md" ]]; then
