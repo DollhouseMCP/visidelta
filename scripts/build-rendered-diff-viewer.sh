@@ -36,16 +36,18 @@ build_with_default_jekyll() {
   local dest_dir="$2"
   local label="$3"
   local baseurl="$4"
-  local uid_gid
-  uid_gid="$(id -u):$(id -g)"
+  local host_uid host_gid
+  host_uid="$(id -u)"
+  host_gid="$(id -g)"
 
   echo "Building $label site with jekyll/jekyll:pages ..."
   docker run --rm \
-    --user "$uid_gid" \
+    -e HOST_UID="$host_uid" \
+    -e HOST_GID="$host_gid" \
     -v "$src_dir":/srv/jekyll \
     -v "$dest_dir":/out \
     jekyll/jekyll:pages \
-    sh -lc "jekyll build --source /srv/jekyll --destination /out --baseurl '$baseurl' --verbose >/dev/null"
+    sh -lc "jekyll build --source /srv/jekyll --destination /out --baseurl '$baseurl' --verbose >/dev/null && chown -R \"${HOST_UID}:${HOST_GID}\" /out || true"
 }
 
 build_with_cmd() {
