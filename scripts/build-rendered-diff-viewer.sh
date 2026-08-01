@@ -62,12 +62,14 @@ build_with_default_jekyll() {
       -v "$dest_dir":/out \
       ruby:3.1 \
       bash -c 'set -euo pipefail
+        # chown from an EXIT trap so a failed build cannot strand root-owned
+        # partial output that breaks the next local run'"'"'s cleanup.
+        trap "chown -R \"$HOST_UID:$HOST_GID\" /out || true" EXIT
         mkdir -p /tmp/src
         tar -C /srv/jekyll --exclude=.git --exclude=node_modules --exclude=vendor -cf - . | tar -xf - -C /tmp/src
         cd /tmp/src
         bundle install --quiet
-        bundle exec jekyll build --source /tmp/src --destination /out --baseurl "$BASEURL" >/dev/null
-        chown -R "$HOST_UID:$HOST_GID" /out'
+        bundle exec jekyll build --source /tmp/src --destination /out --baseurl "$BASEURL" >/dev/null'
   else
     echo "Building $label site with jekyll/jekyll:pages ..."
     docker run --rm \
@@ -179,9 +181,16 @@ route_for_markdown() {
   local prefer_root="${2:-$REPO_ROOT}"
   local fallback_root="${3:-$MAIN_SRC}"
 
-  local permalink
-  permalink="$(fm_permalink_in "$prefer_root" "$path")"
-  [[ -n "$permalink" ]] || permalink="$(fm_permalink_in "$fallback_root" "$path")"
+  # Only consult the other tree when the preferred file is ABSENT. A file
+  # that exists with no permalink means "no permalink on this side" — e.g.
+  # base about.md renders at /about/ while the branch adds permalink:
+  # /company/; the old frame must keep /about/, not inherit /company/.
+  local permalink=""
+  if [[ -f "$prefer_root/$path" ]]; then
+    permalink="$(fm_permalink_in "$prefer_root" "$path")"
+  elif [[ -f "$fallback_root/$path" ]]; then
+    permalink="$(fm_permalink_in "$fallback_root" "$path")"
+  fi
   # Placeholder permalinks (/blog/:title/) can't be resolved without running
   # Jekyll's URL expansion; fall back to file-path mapping for those.
   if [[ -n "$permalink" && "$permalink" != *:* ]]; then
