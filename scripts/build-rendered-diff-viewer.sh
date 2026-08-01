@@ -66,7 +66,7 @@ build_with_default_jekyll() {
         # partial output that breaks the next local run'"'"'s cleanup.
         trap "chown -R \"$HOST_UID:$HOST_GID\" /out || true" EXIT
         mkdir -p /tmp/src
-        tar -C /srv/jekyll --exclude=.git --exclude=node_modules --exclude=vendor -cf - . | tar -xf - -C /tmp/src
+        tar -C /srv/jekyll --exclude=.git --exclude=node_modules --exclude=./vendor/bundle -cf - . | tar -xf - -C /tmp/src
         cd /tmp/src
         bundle install --quiet
         bundle exec jekyll build --source /tmp/src --destination /out --baseurl "$BASEURL" >/dev/null'
@@ -171,6 +171,7 @@ fm_permalink_in() {
   local path="$2"
   [[ -f "$root/$path" ]] || return 0
   awk -v sq="'" '
+    { sub(/\r$/, "") }  # CRLF files: Jekyll accepts ---\r delimiters; so must we
     NR==1 && $0!="---" { exit }
     NR>1 && $0=="---" { exit }
     index($0, "permalink:")==1 {
