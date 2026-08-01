@@ -40,14 +40,39 @@ build_with_default_jekyll() {
   host_uid="$(id -u)"
   host_gid="$(id -g)"
 
-  echo "Building $label site with jekyll/jekyll:pages ..."
-  docker run --rm \
-    -e HOST_UID="$host_uid" \
-    -e HOST_GID="$host_gid" \
-    -v "$src_dir":/srv/jekyll \
-    -v "$dest_dir":/out \
-    jekyll/jekyll:pages \
-    sh -lc "jekyll build --source /srv/jekyll --destination /out --baseurl '$baseurl' --verbose >/dev/null && chown -R \"\$HOST_UID:\$HOST_GID\" /out || true"
+  if [[ -f "$src_dir/Gemfile" ]]; then
+    # A Gemfile means the site pins its own toolchain (github-pages gem,
+    # plugins, ...). The jekyll/jekyll:pages image never runs bundle install,
+    # so jekyll's plugin manager dies with Bundler::GemNotFound (issue #10).
+    # Build with a plain ruby image + bundler instead, which honors any
+    # Gemfile.lock. PAGES_REPO_NWO keeps jekyll-github-metadata working on
+    # exported trees that have no .git directory.
+    echo "Building $label site with ruby:3.1 + bundler (Gemfile detected) ..."
+    docker run --rm \
+      -e HOST_UID="$host_uid" \
+      -e HOST_GID="$host_gid" \
+      -e BASEURL="$baseurl" \
+      -e BUNDLE_PATH=/tmp/bundle \
+      -e JEKYLL_ENV="${JEKYLL_ENV:-production}" \
+      -e PAGES_REPO_NWO="${PAGES_REPO_NWO:-${GITHUB_REPOSITORY:-}}" \
+      -v "$src_dir":/srv/jekyll \
+      -v "$dest_dir":/out \
+      -w /srv/jekyll \
+      ruby:3.1 \
+      bash -c 'set -euo pipefail
+        bundle install --quiet
+        bundle exec jekyll build --source /srv/jekyll --destination /out --baseurl "$BASEURL" >/dev/null
+        chown -R "$HOST_UID:$HOST_GID" /out'
+  else
+    echo "Building $label site with jekyll/jekyll:pages ..."
+    docker run --rm \
+      -e HOST_UID="$host_uid" \
+      -e HOST_GID="$host_gid" \
+      -v "$src_dir":/srv/jekyll \
+      -v "$dest_dir":/out \
+      jekyll/jekyll:pages \
+      sh -lc "jekyll build --source /srv/jekyll --destination /out --baseurl '$baseurl' --verbose >/dev/null && chown -R \"\$HOST_UID:\$HOST_GID\" /out"
+  fi
 }
 
 build_with_cmd() {
@@ -78,8 +103,22 @@ build_site() {
   fi
 }
 
+# A build that produced no HTML is a failed build. Fail the run instead of
+# publishing a hollow viewer whose every route 404s (issue #10) — a red check
+# is honest; a green check with a dead preview is not.
+assert_built() {
+  local dest_dir="$1"
+  local label="$2"
+  if [[ -z "$(find "$dest_dir" -name '*.html' -print -quit 2>/dev/null)" ]]; then
+    echo "ERROR: $label site build produced no HTML in $dest_dir; refusing to publish an empty viewer." >&2
+    exit 1
+  fi
+}
+
 build_site "$MAIN_SRC" "$OLD_DIR" "base" "/old" "${BUILD_OLD_CMD:-}"
+assert_built "$OLD_DIR" "base"
 build_site "$REPO_ROOT" "$NEW_DIR" "current" "/new" "${BUILD_NEW_CMD:-${BUILD_OLD_CMD:-}}"
+assert_built "$NEW_DIR" "current"
 
 rewrite_prefixed_links_relative() {
   local site_dir="$1"
@@ -108,8 +147,45 @@ rewrite_prefixed_links_relative() {
 rewrite_prefixed_links_relative "$OLD_DIR" "old"
 rewrite_prefixed_links_relative "$NEW_DIR" "new"
 
+fm_permalink() {
+  # Print the front-matter permalink of a changed file, if any. Prefer the
+  # current branch's copy; fall back to the base export for deleted files.
+  local path="$1"
+  local src=""
+  if [[ -f "$REPO_ROOT/$path" ]]; then
+    src="$REPO_ROOT/$path"
+  elif [[ -f "$MAIN_SRC/$path" ]]; then
+    src="$MAIN_SRC/$path"
+  else
+    return 0
+  fi
+  awk '
+    NR==1 && $0!="---" { exit }
+    NR>1 && $0=="---" { exit }
+    index($0, "permalink:")==1 {
+      sub("permalink:", "")
+      gsub(/^[ \t]+|[ \t\r]+$/, "")
+      gsub(/^["'"'"']|["'"'"']$/, "")
+      print
+      exit
+    }
+  ' "$src"
+}
+
 route_for_markdown() {
   local path="$1"
+
+  # An explicit front-matter permalink is the rendered route (e.g. Jekyll
+  # _posts land at their permalink, never at /_posts/...). File-path mapping
+  # below is only the fallback for plain pages.
+  local permalink
+  permalink="$(fm_permalink "$path")"
+  if [[ -n "$permalink" ]]; then
+    permalink="/${permalink#/}"
+    printf "%s" "$permalink"
+    return 0
+  fi
+
   if [[ "$path" == "index.md" ]]; then
     printf "/"
   elif [[ "$path" == */index.md ]]; then
