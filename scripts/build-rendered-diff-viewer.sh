@@ -48,6 +48,9 @@ build_with_default_jekyll() {
     # Gemfile.lock. PAGES_REPO_NWO keeps jekyll-github-metadata working on
     # exported trees that have no .git directory.
     echo "Building $label site with ruby:3.1 + bundler (Gemfile detected) ..."
+    # The source is mounted read-only and copied inside the container so
+    # bundle install can never create or update a (root-owned) Gemfile.lock
+    # in the caller's checkout.
     docker run --rm \
       -e HOST_UID="$host_uid" \
       -e HOST_GID="$host_gid" \
@@ -55,13 +58,15 @@ build_with_default_jekyll() {
       -e BUNDLE_PATH=/tmp/bundle \
       -e JEKYLL_ENV="${JEKYLL_ENV:-production}" \
       -e PAGES_REPO_NWO="${PAGES_REPO_NWO:-${GITHUB_REPOSITORY:-}}" \
-      -v "$src_dir":/srv/jekyll \
+      -v "$src_dir":/srv/jekyll:ro \
       -v "$dest_dir":/out \
-      -w /srv/jekyll \
       ruby:3.1 \
       bash -c 'set -euo pipefail
+        mkdir -p /tmp/src
+        tar -C /srv/jekyll --exclude=.git --exclude=node_modules --exclude=vendor -cf - . | tar -xf - -C /tmp/src
+        cd /tmp/src
         bundle install --quiet
-        bundle exec jekyll build --source /srv/jekyll --destination /out --baseurl "$BASEURL" >/dev/null
+        bundle exec jekyll build --source /tmp/src --destination /out --baseurl "$BASEURL" >/dev/null
         chown -R "$HOST_UID:$HOST_GID" /out'
   else
     echo "Building $label site with jekyll/jekyll:pages ..."
@@ -147,18 +152,11 @@ rewrite_prefixed_links_relative() {
 rewrite_prefixed_links_relative "$OLD_DIR" "old"
 rewrite_prefixed_links_relative "$NEW_DIR" "new"
 
-fm_permalink() {
-  # Print the front-matter permalink of a changed file, if any. Prefer the
-  # current branch's copy; fall back to the base export for deleted files.
-  local path="$1"
-  local src=""
-  if [[ -f "$REPO_ROOT/$path" ]]; then
-    src="$REPO_ROOT/$path"
-  elif [[ -f "$MAIN_SRC/$path" ]]; then
-    src="$MAIN_SRC/$path"
-  else
-    return 0
-  fi
+fm_permalink_in() {
+  # Print the front-matter permalink of a file inside one source tree.
+  local root="$1"
+  local path="$2"
+  [[ -f "$root/$path" ]] || return 0
   awk '
     NR==1 && $0!="---" { exit }
     NR>1 && $0=="---" { exit }
@@ -169,20 +167,25 @@ fm_permalink() {
       print
       exit
     }
-  ' "$src"
+  ' "$root/$path"
 }
 
 route_for_markdown() {
+  # Route for one SIDE of the comparison: the preferred tree's permalink
+  # wins, so a permalink that changed between base and current maps each
+  # frame to its own real route. Falls back to the other tree for files
+  # that do not exist on this side, then to plain file-path mapping.
   local path="$1"
+  local prefer_root="${2:-$REPO_ROOT}"
+  local fallback_root="${3:-$MAIN_SRC}"
 
-  # An explicit front-matter permalink is the rendered route (e.g. Jekyll
-  # _posts land at their permalink, never at /_posts/...). File-path mapping
-  # below is only the fallback for plain pages.
   local permalink
-  permalink="$(fm_permalink "$path")"
-  if [[ -n "$permalink" ]]; then
-    permalink="/${permalink#/}"
-    printf "%s" "$permalink"
+  permalink="$(fm_permalink_in "$prefer_root" "$path")"
+  [[ -n "$permalink" ]] || permalink="$(fm_permalink_in "$fallback_root" "$path")"
+  # Placeholder permalinks (/blog/:title/) can't be resolved without running
+  # Jekyll's URL expansion; fall back to file-path mapping for those.
+  if [[ -n "$permalink" && "$permalink" != *:* ]]; then
+    printf "/%s" "${permalink#/}"
     return 0
   fi
 
@@ -231,7 +234,9 @@ fi
   printf "[\n"
   for i in "${!CHANGED_MD[@]}"; do
     file="${CHANGED_MD[$i]}"
-    route="$(route_for_markdown "$file")"
+    new_route="$(route_for_markdown "$file" "$REPO_ROOT" "$MAIN_SRC")"
+    old_route="$(route_for_markdown "$file" "$MAIN_SRC" "$REPO_ROOT")"
+    route="$new_route"
     id="$(printf "p%03d" $((i + 1)))"
     add_file="$DIFF_DIR/$id.add.txt"
     del_file="$DIFF_DIR/$id.del.txt"
@@ -258,7 +263,7 @@ fi
     if [[ "$i" -eq $(( ${#CHANGED_MD[@]} - 1 )) ]]; then
       comma=""
     fi
-    printf "  {\"id\":\"%s\",\"file\":\"%s\",\"route\":\"%s\"}%s\n" "$id" "$file" "$route" "$comma"
+    printf "  {\"id\":\"%s\",\"file\":\"%s\",\"route\":\"%s\",\"old_route\":\"%s\",\"new_route\":\"%s\"}%s\n" "$id" "$file" "$route" "$old_route" "$new_route" "$comma"
   done
   printf "]\n"
 } >"$ROUTES_FILE"
@@ -307,8 +312,8 @@ cat >"$OUT_DIR/index.html" <<'HTML'
               <td><code>${item.route}</code></td>
               <td>
                 <a href="./viewer.html?path=${encodeURIComponent(item.route)}" target="_blank" rel="noopener">Compare</a>
-                <a href="./old${item.route}" target="_blank" rel="noopener">Old</a>
-                <a href="./new${item.route}" target="_blank" rel="noopener">New</a>
+                <a href="./old${item.old_route || item.route}" target="_blank" rel="noopener">Old</a>
+                <a href="./new${item.new_route || item.route}" target="_blank" rel="noopener">New</a>
               </td>
             `;
             tbody.appendChild(tr);
@@ -469,7 +474,11 @@ cat >"$OUT_DIR/viewer.html" <<'HTML'
       function normalizeRoute(path) {
         if (!path) return "/";
         const withLeading = path.startsWith("/") ? path : `/${path}`;
-        return withLeading.endsWith("/") ? withLeading : `${withLeading}/`;
+        if (withLeading.endsWith("/")) return withLeading;
+        // File-style permalinks (/about.html) must NOT gain a trailing
+        // slash — Jekyll emitted a file there, not a directory.
+        const last = withLeading.split("/").pop();
+        return last.includes(".") ? withLeading : `${withLeading}/`;
       }
 
       function normalizeText(str) {
@@ -698,9 +707,13 @@ cat >"$OUT_DIR/viewer.html" <<'HTML'
 
       async function updateRoute(route) {
         currentRoute = normalizeRoute(route);
-        const oldSrc = `./old${currentRoute}`;
-        const newSrc = `./new${currentRoute}`;
         currentPage = pages.find((p) => normalizeRoute(p.route) === currentRoute) || null;
+        // Each frame uses its own side's route so a permalink that changed
+        // between base and current still renders on both sides.
+        const oldRoute = normalizeRoute((currentPage && currentPage.old_route) || currentRoute);
+        const newRoute = normalizeRoute((currentPage && currentPage.new_route) || currentRoute);
+        const oldSrc = `./old${oldRoute}`;
+        const newSrc = `./new${newRoute}`;
         routeCode.textContent = currentRoute;
         oldFrame.src = oldSrc;
         newFrame.src = newSrc;
