@@ -40,14 +40,46 @@ build_with_default_jekyll() {
   host_uid="$(id -u)"
   host_gid="$(id -g)"
 
-  echo "Building $label site with jekyll/jekyll:pages ..."
-  docker run --rm \
-    -e HOST_UID="$host_uid" \
-    -e HOST_GID="$host_gid" \
-    -v "$src_dir":/srv/jekyll \
-    -v "$dest_dir":/out \
-    jekyll/jekyll:pages \
-    sh -lc "jekyll build --source /srv/jekyll --destination /out --baseurl '$baseurl' --verbose >/dev/null && chown -R \"\$HOST_UID:\$HOST_GID\" /out || true"
+  if [[ -f "$src_dir/Gemfile" ]]; then
+    # A Gemfile means the site pins its own toolchain (github-pages gem,
+    # plugins, ...). The jekyll/jekyll:pages image never runs bundle install,
+    # so jekyll's plugin manager dies with Bundler::GemNotFound (issue #10).
+    # Build with a plain ruby image + bundler instead, which honors any
+    # Gemfile.lock. PAGES_REPO_NWO keeps jekyll-github-metadata working on
+    # exported trees that have no .git directory.
+    echo "Building $label site with ruby:3.1 + bundler (Gemfile detected) ..."
+    # The source is mounted read-only and copied inside the container so
+    # bundle install can never create or update a (root-owned) Gemfile.lock
+    # in the caller's checkout.
+    docker run --rm \
+      -e HOST_UID="$host_uid" \
+      -e HOST_GID="$host_gid" \
+      -e BASEURL="$baseurl" \
+      -e BUNDLE_PATH=/tmp/bundle \
+      -e JEKYLL_ENV="${JEKYLL_ENV:-production}" \
+      -e PAGES_REPO_NWO="${PAGES_REPO_NWO:-${GITHUB_REPOSITORY:-}}" \
+      -v "$src_dir":/srv/jekyll:ro \
+      -v "$dest_dir":/out \
+      ruby:3.1 \
+      bash -c 'set -euo pipefail
+        # chown from an EXIT trap so a failed build cannot strand root-owned
+        # partial output that breaks the next local run'"'"'s cleanup.
+        trap "chown -R \"$HOST_UID:$HOST_GID\" /out || true" EXIT
+        mkdir -p /tmp/src
+        tar -C /srv/jekyll --exclude=.git --exclude=node_modules --exclude=./vendor/bundle -cf - . | tar -xf - -C /tmp/src
+        cd /tmp/src
+        bundle install --quiet
+        bundle exec jekyll build --source /tmp/src --destination /out --baseurl "$BASEURL" >/dev/null'
+  else
+    echo "Building $label site with jekyll/jekyll:pages ..."
+    docker run --rm \
+      -e HOST_UID="$host_uid" \
+      -e HOST_GID="$host_gid" \
+      -v "$src_dir":/srv/jekyll \
+      -v "$dest_dir":/out \
+      jekyll/jekyll:pages \
+      sh -lc "jekyll build --source /srv/jekyll --destination /out --baseurl '$baseurl' --verbose >/dev/null && chown -R \"\$HOST_UID:\$HOST_GID\" /out"
+  fi
 }
 
 build_with_cmd() {
@@ -78,8 +110,31 @@ build_site() {
   fi
 }
 
+# A build that produced no HTML is a failed build. Fail the run instead of
+# publishing a hollow viewer whose every route 404s (issue #10) — a red check
+# is honest; a green check with a dead preview is not. HTML detection is
+# case-insensitive (*.htm, *.HTML, ...); a CUSTOM build command that emitted
+# files but no *.htm* names (extensionless output, non-HTML site) gets a
+# warning instead of a failure, since its output shape is user-owned.
+assert_built() {
+  local dest_dir="$1"
+  local label="$2"
+  local custom_cmd="$3"
+  if [[ -n "$(find "$dest_dir" -type f -iname '*.htm*' -print -quit 2>/dev/null)" ]]; then
+    return 0
+  fi
+  if [[ -n "$custom_cmd" && -n "$(find "$dest_dir" -type f -print -quit 2>/dev/null)" ]]; then
+    echo "WARNING: $label site build (custom command) produced no *.htm* files; assuming extensionless or non-HTML output is intentional." >&2
+    return 0
+  fi
+  echo "ERROR: $label site build produced no HTML in $dest_dir; refusing to publish an empty viewer." >&2
+  exit 1
+}
+
 build_site "$MAIN_SRC" "$OLD_DIR" "base" "/old" "${BUILD_OLD_CMD:-}"
+assert_built "$OLD_DIR" "base" "${BUILD_OLD_CMD:-}"
 build_site "$REPO_ROOT" "$NEW_DIR" "current" "/new" "${BUILD_NEW_CMD:-${BUILD_OLD_CMD:-}}"
+assert_built "$NEW_DIR" "current" "${BUILD_NEW_CMD:-${BUILD_OLD_CMD:-}}"
 
 rewrite_prefixed_links_relative() {
   local site_dir="$1"
@@ -108,8 +163,94 @@ rewrite_prefixed_links_relative() {
 rewrite_prefixed_links_relative "$OLD_DIR" "old"
 rewrite_prefixed_links_relative "$NEW_DIR" "new"
 
+fm_permalink_in() {
+  # Print the front-matter permalink of a file inside one source tree.
+  # Quoted values take everything inside the quotes; unquoted values are
+  # stripped of inline YAML comments (whitespace + #) and trailing space.
+  local root="$1"
+  local path="$2"
+  [[ -f "$root/$path" ]] || return 0
+  awk -v sq="'" '
+    { sub(/\r$/, "") }  # CRLF files: Jekyll accepts ---\r delimiters; so must we
+    NR==1 && $0!="---" { exit }
+    NR>1 && $0=="---" { exit }
+    index($0, "permalink:")==1 {
+      sub("permalink:", "")
+      gsub(/^[ \t]+/, "")
+      q = substr($0, 1, 1)
+      if (q == sq) {
+        # Single-quoted YAML scalar: '' is an escaped quote.
+        s = substr($0, 2); out = ""
+        while (1) {
+          i = index(s, sq)
+          if (i == 0) { out = out s; break }
+          if (substr(s, i + 1, 1) == sq) {
+            out = out substr(s, 1, i - 1) sq
+            s = substr(s, i + 2)
+          } else {
+            out = out substr(s, 1, i - 1)
+            break
+          }
+        }
+        print out
+        exit
+      }
+      if (q == "\"") {
+        # Double-quoted YAML scalar: backslash escapes; find the first
+        # quote preceded by an even number of backslashes.
+        s = substr($0, 2); out = ""
+        while (1) {
+          i = index(s, "\"")
+          if (i == 0) { out = out s; break }
+          j = i - 1; nb = 0
+          while (j >= 1 && substr(s, j, 1) == "\\") { nb += 1; j -= 1 }
+          if (nb % 2 == 1) {
+            out = out substr(s, 1, i)
+            s = substr(s, i + 1)
+          } else {
+            out = out substr(s, 1, i - 1)
+            break
+          }
+        }
+        gsub(/\\"/, "\"", out)
+        gsub(/\\\\/, "\\", out)
+        print out
+        exit
+      }
+      sub(/[ \t]+#.*$/, "")
+      gsub(/[ \t\r]+$/, "")
+      print
+      exit
+    }
+  ' "$root/$path"
+}
+
 route_for_markdown() {
+  # Route for one SIDE of the comparison: the preferred tree's permalink
+  # wins, so a permalink that changed between base and current maps each
+  # frame to its own real route. Falls back to the other tree for files
+  # that do not exist on this side, then to plain file-path mapping.
   local path="$1"
+  local prefer_root="${2:-$REPO_ROOT}"
+  local fallback_root="${3:-$MAIN_SRC}"
+
+  # Only consult the other tree when the preferred file is ABSENT. A file
+  # that exists with no permalink means "no permalink on this side" — e.g.
+  # base about.md renders at /about/ while the branch adds permalink:
+  # /company/; the old frame must keep /about/, not inherit /company/.
+  local permalink=""
+  if [[ -f "$prefer_root/$path" ]]; then
+    permalink="$(fm_permalink_in "$prefer_root" "$path")"
+  elif [[ -f "$fallback_root/$path" ]]; then
+    permalink="$(fm_permalink_in "$fallback_root" "$path")"
+  fi
+  # Placeholder permalinks (/blog/:title/) can't be resolved without running
+  # Jekyll's URL expansion; fall back to file-path mapping for those.
+  if [[ -n "$permalink" && "$permalink" != *:* ]]; then
+    printf "/%s" "${permalink#/}"
+    return 0
+  fi
+
   if [[ "$path" == "index.md" ]]; then
     printf "/"
   elif [[ "$path" == */index.md ]]; then
@@ -155,7 +296,9 @@ fi
   printf "[\n"
   for i in "${!CHANGED_MD[@]}"; do
     file="${CHANGED_MD[$i]}"
-    route="$(route_for_markdown "$file")"
+    new_route="$(route_for_markdown "$file" "$REPO_ROOT" "$MAIN_SRC")"
+    old_route="$(route_for_markdown "$file" "$MAIN_SRC" "$REPO_ROOT")"
+    route="$new_route"
     id="$(printf "p%03d" $((i + 1)))"
     add_file="$DIFF_DIR/$id.add.txt"
     del_file="$DIFF_DIR/$id.del.txt"
@@ -182,7 +325,7 @@ fi
     if [[ "$i" -eq $(( ${#CHANGED_MD[@]} - 1 )) ]]; then
       comma=""
     fi
-    printf "  {\"id\":\"%s\",\"file\":\"%s\",\"route\":\"%s\"}%s\n" "$id" "$file" "$route" "$comma"
+    printf "  {\"id\":\"%s\",\"file\":\"%s\",\"route\":\"%s\",\"old_route\":\"%s\",\"new_route\":\"%s\"}%s\n" "$id" "$file" "$route" "$old_route" "$new_route" "$comma"
   done
   printf "]\n"
 } >"$ROUTES_FILE"
@@ -231,8 +374,8 @@ cat >"$OUT_DIR/index.html" <<'HTML'
               <td><code>${item.route}</code></td>
               <td>
                 <a href="./viewer.html?path=${encodeURIComponent(item.route)}" target="_blank" rel="noopener">Compare</a>
-                <a href="./old${item.route}" target="_blank" rel="noopener">Old</a>
-                <a href="./new${item.route}" target="_blank" rel="noopener">New</a>
+                <a href="./old${item.old_route || item.route}" target="_blank" rel="noopener">Old</a>
+                <a href="./new${item.new_route || item.route}" target="_blank" rel="noopener">New</a>
               </td>
             `;
             tbody.appendChild(tr);
@@ -393,7 +536,11 @@ cat >"$OUT_DIR/viewer.html" <<'HTML'
       function normalizeRoute(path) {
         if (!path) return "/";
         const withLeading = path.startsWith("/") ? path : `/${path}`;
-        return withLeading.endsWith("/") ? withLeading : `${withLeading}/`;
+        if (withLeading.endsWith("/")) return withLeading;
+        // File-style permalinks (/about.html) must NOT gain a trailing
+        // slash — Jekyll emitted a file there, not a directory.
+        const last = withLeading.split("/").pop();
+        return last.includes(".") ? withLeading : `${withLeading}/`;
       }
 
       function normalizeText(str) {
@@ -622,9 +769,13 @@ cat >"$OUT_DIR/viewer.html" <<'HTML'
 
       async function updateRoute(route) {
         currentRoute = normalizeRoute(route);
-        const oldSrc = `./old${currentRoute}`;
-        const newSrc = `./new${currentRoute}`;
         currentPage = pages.find((p) => normalizeRoute(p.route) === currentRoute) || null;
+        // Each frame uses its own side's route so a permalink that changed
+        // between base and current still renders on both sides.
+        const oldRoute = normalizeRoute((currentPage && currentPage.old_route) || currentRoute);
+        const newRoute = normalizeRoute((currentPage && currentPage.new_route) || currentRoute);
+        const oldSrc = `./old${oldRoute}`;
+        const newSrc = `./new${newRoute}`;
         routeCode.textContent = currentRoute;
         oldFrame.src = oldSrc;
         newFrame.src = newSrc;
