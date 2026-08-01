@@ -178,11 +178,43 @@ fm_permalink_in() {
       sub("permalink:", "")
       gsub(/^[ \t]+/, "")
       q = substr($0, 1, 1)
-      if (q == "\"" || q == sq) {
-        s = substr($0, 2)
-        i = index(s, q)
-        if (i > 0) s = substr(s, 1, i - 1)
-        print s
+      if (q == sq) {
+        # Single-quoted YAML scalar: '' is an escaped quote.
+        s = substr($0, 2); out = ""
+        while (1) {
+          i = index(s, sq)
+          if (i == 0) { out = out s; break }
+          if (substr(s, i + 1, 1) == sq) {
+            out = out substr(s, 1, i - 1) sq
+            s = substr(s, i + 2)
+          } else {
+            out = out substr(s, 1, i - 1)
+            break
+          }
+        }
+        print out
+        exit
+      }
+      if (q == "\"") {
+        # Double-quoted YAML scalar: backslash escapes; find the first
+        # quote preceded by an even number of backslashes.
+        s = substr($0, 2); out = ""
+        while (1) {
+          i = index(s, "\"")
+          if (i == 0) { out = out s; break }
+          j = i - 1; nb = 0
+          while (j >= 1 && substr(s, j, 1) == "\\") { nb += 1; j -= 1 }
+          if (nb % 2 == 1) {
+            out = out substr(s, 1, i)
+            s = substr(s, i + 1)
+          } else {
+            out = out substr(s, 1, i - 1)
+            break
+          }
+        }
+        gsub(/\\"/, "\"", out)
+        gsub(/\\\\/, "\\", out)
+        print out
         exit
       }
       sub(/[ \t]+#.*$/, "")
