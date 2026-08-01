@@ -112,20 +112,29 @@ build_site() {
 
 # A build that produced no HTML is a failed build. Fail the run instead of
 # publishing a hollow viewer whose every route 404s (issue #10) — a red check
-# is honest; a green check with a dead preview is not.
+# is honest; a green check with a dead preview is not. HTML detection is
+# case-insensitive (*.htm, *.HTML, ...); a CUSTOM build command that emitted
+# files but no *.htm* names (extensionless output, non-HTML site) gets a
+# warning instead of a failure, since its output shape is user-owned.
 assert_built() {
   local dest_dir="$1"
   local label="$2"
-  if [[ -z "$(find "$dest_dir" -name '*.html' -print -quit 2>/dev/null)" ]]; then
-    echo "ERROR: $label site build produced no HTML in $dest_dir; refusing to publish an empty viewer." >&2
-    exit 1
+  local custom_cmd="$3"
+  if [[ -n "$(find "$dest_dir" -type f -iname '*.htm*' -print -quit 2>/dev/null)" ]]; then
+    return 0
   fi
+  if [[ -n "$custom_cmd" && -n "$(find "$dest_dir" -type f -print -quit 2>/dev/null)" ]]; then
+    echo "WARNING: $label site build (custom command) produced no *.htm* files; assuming extensionless or non-HTML output is intentional." >&2
+    return 0
+  fi
+  echo "ERROR: $label site build produced no HTML in $dest_dir; refusing to publish an empty viewer." >&2
+  exit 1
 }
 
 build_site "$MAIN_SRC" "$OLD_DIR" "base" "/old" "${BUILD_OLD_CMD:-}"
-assert_built "$OLD_DIR" "base"
+assert_built "$OLD_DIR" "base" "${BUILD_OLD_CMD:-}"
 build_site "$REPO_ROOT" "$NEW_DIR" "current" "/new" "${BUILD_NEW_CMD:-${BUILD_OLD_CMD:-}}"
-assert_built "$NEW_DIR" "current"
+assert_built "$NEW_DIR" "current" "${BUILD_NEW_CMD:-${BUILD_OLD_CMD:-}}"
 
 rewrite_prefixed_links_relative() {
   local site_dir="$1"
@@ -156,16 +165,27 @@ rewrite_prefixed_links_relative "$NEW_DIR" "new"
 
 fm_permalink_in() {
   # Print the front-matter permalink of a file inside one source tree.
+  # Quoted values take everything inside the quotes; unquoted values are
+  # stripped of inline YAML comments (whitespace + #) and trailing space.
   local root="$1"
   local path="$2"
   [[ -f "$root/$path" ]] || return 0
-  awk '
+  awk -v sq="'" '
     NR==1 && $0!="---" { exit }
     NR>1 && $0=="---" { exit }
     index($0, "permalink:")==1 {
       sub("permalink:", "")
-      gsub(/^[ \t]+|[ \t\r]+$/, "")
-      gsub(/^["'"'"']|["'"'"']$/, "")
+      gsub(/^[ \t]+/, "")
+      q = substr($0, 1, 1)
+      if (q == "\"" || q == sq) {
+        s = substr($0, 2)
+        i = index(s, q)
+        if (i > 0) s = substr(s, 1, i - 1)
+        print s
+        exit
+      }
+      sub(/[ \t]+#.*$/, "")
+      gsub(/[ \t\r]+$/, "")
       print
       exit
     }
